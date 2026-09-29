@@ -18,6 +18,18 @@ pip install -r requirements.txt
 
 Run everything from the repo root. Outputs are written to `./output/`.
 
+## Regenerate the CSVs
+
+```sh
+python -m ollama_inventory            # rebuild both CSVs from cached data (fast, no downloads)
+python -m ollama_inventory --refresh  # re-query Ollama and re-download ollama.com (about 5 minutes)
+```
+
+- **Use `--refresh` after pulling or removing models**, or to pick up new catalog releases. A plain run reuses `output/cache/`, including this machine's saved model list, so it won't see changes. `--refresh` re-fetches both the local inventory and the catalog.
+- **For your other machine**, add `--host framework --ollama-url http://<framework-address>:11434`.
+- **Both CSVs are rewritten every run.** Your `run_on` edits in `ollama_models_by_model.csv` are kept.
+- Each run starts by printing the host it chose, e.g. `host: shadow (from hostname ...)`.
+
 ## Stages
 
 | Stage | What it does | Status |
