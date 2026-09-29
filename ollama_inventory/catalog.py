@@ -272,6 +272,7 @@ def _to_row(m, t, detail):
         "quantization": detail.get("quantization", ""),
         "context_length": _context_tokens(t["context"]),
         "disk_size_gb": _size_gb(t["size"]),
+        "size_source": "catalog",
         "thinking": "thinking" in badges,
         "tools": "tools" in badges,
         # Per-tag input column is more specific than the model badge (e.g. text-only variants).

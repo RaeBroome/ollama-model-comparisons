@@ -30,7 +30,7 @@ def test_per_tag_csv_column_order(tmp_path):
     cli.write_csv([{"name": "a:1b", "source": "local"}], cli.COLUMNS, path)
     with open(path, newline="", encoding="utf-8") as f:
         assert next(csv.reader(f)) == cli.COLUMNS
-    assert cli.COLUMNS[:3] == ["name", "tag", "source"]
+    assert cli.COLUMNS[:3] == ["name", "tag", "host"]
 
 
 def test_by_model_csv_column_order(tmp_path):
@@ -49,11 +49,11 @@ def test_age_bounds_match_go_humanize_buckets():
 
 
 def test_fit_uses_usable_limit_and_warns():
-    assert fit(18.6, 262144, HOSTS)[:2] == (19, "")           # fits shadow's usable 19
-    assert "262K ctx" in fit(18.6, 262144, HOSTS)[2]          # long context near the limit
-    assert fit(20.0, 4096, HOSTS)[2] == "20 GB misses shadow 19 by 1"
-    assert fit(120, 4096, HOSTS)[:2] == ("", "120 GB > framework 96")
-    assert fit("", 4096, HOSTS)[1] == "no disk size"
+    assert fit(18.6, HOSTS)[:3] == (19, "", "18.6 GB vs shadow 19, within 5%")  # 97.9% of usable
+    assert fit(18.0, HOSTS)[2] == ""                                          # 94.7%: no warning
+    assert fit(20.0, HOSTS)[2] == "20 GB misses shadow 19 by 1"
+    assert fit(120, HOSTS)[:2] == ("", "120 GB > framework 96")
+    assert fit("", HOSTS)[1] == "no disk size"
 
 
 def test_collapse_splits_coding_and_drops_mlx():

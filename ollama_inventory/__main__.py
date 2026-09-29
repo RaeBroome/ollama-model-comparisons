@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import socket
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,15 +15,14 @@ CACHE_DIR = OUT_DIR / "cache"
 CSV_PATH = OUT_DIR / "ollama_models.csv"
 BY_MODEL_PATH = OUT_DIR / "ollama_models_by_model.csv"
 HOSTS_PATH = Path("config") / "hosts.json"
+# The last catalog crawl, so --local-only can rebuild the CSVs without crawling.
+CATALOG_PATH = CACHE_DIR / "catalog_rows.json"
 
 COLUMNS = [
-    "name", "tag", "source", "host", "pulled", "family", "parameter_size", "quantization", "context_length",
-    "disk_size_gb", "thinking", "tools", "vision", "pull_count", "first_published_approx", "date_source_text",
-    "date_flag", "recent_6mo", "modified_at", "digest", "url",
+    "name", "tag", "host", "pulled", "family", "parameter_size", "quantization", "context_length",
+    "disk_size_gb", "size_source", "tools", "vision", "pull_count", "first_published_approx", "modified_at", "digest",
+    "url",
 ]
-# Catalog fields copied onto a pulled local row; local API values win for everything else.
-CATALOG_ONLY = ["pull_count", "first_published_approx", "date_source_text", "date_flag", "url"]
-
 
 def cached(name, fetch, refresh):
     """Load raw data from output/cache/<name>.json unless --refresh or missing."""
@@ -66,55 +66,37 @@ def write_csv(rows, columns, path=CSV_PATH):
         w.writerows(rows)
 
 
-def add_local_recency(local_rows, fetcher, now, problems):
-    """recent_6mo for pulled models, using the same oldest-tag rule as the catalog."""
-    for row in local_rows:
-        if row["is_cloud"]:
-            row["recent_6mo"] = ""
-            continue
-        path = catalog.model_path(row["name"])
-        try:
-            info = catalog.fetch_model(fetcher, path, now)
-        except Exception as e:  # noqa: BLE001 - report and leave blank
-            problems.append(f"local {row['name']}: could not fetch {path}: {e}")
-            row["recent_6mo"] = ""
-            continue
-        r = catalog.recency(info["pub"])
-        row["recent_6mo"] = "" if r is None else r
-        row["pull_count"] = info["model"]["pull_count"]
-        row["url"] = f"{catalog.BASE}/{path}"
-        if info["pub"]:
-            row["first_published_approx"] = info["pub"]["first_published_approx"]
-            row["date_source_text"] = info["pub"]["date_source_text"]
-        if r is None:
-            problems.append(f"local {row['name']}: recency unknown/ambiguous "
-                            f"({info['pub']['date_source_text'] if info['pub'] else 'no date'})")
-        catalog_tag = next((t for t in info["tags"] if t["name"].removeprefix("library/") == row["name"]), None)
-        if catalog_tag and row.get("digest") and not catalog_tag["digest"].startswith(row["digest"][:12]):
-            problems.append(f"local {row['name']}: local digest {row['digest'][:12]} != catalog {catalog_tag['digest']} "
-                            f"(your pull is out of date, or the tag was re-pushed)")
-
-
-def merge(local_rows, catalog_rows):
-    """One row per host + name:tag. Pulled catalog tags collapse into the local row(s), keeping catalog-only fields."""
-    by_name = {r["name"]: r for r in catalog_rows}
-    for row in local_rows:
-        row["pulled"] = True
-        match = by_name.get(row["name"])
-        if match:
-            for k in CATALOG_ONLY:
-                row[k] = match[k]
-    for row in local_rows:
-        by_name.pop(row["name"], None)
-    for row in by_name.values():
-        row["pulled"] = False
-    return local_rows + list(by_name.values())
+def apply_local_lookup(catalog_rows, local_rows, problems):
+    """Local inventories only annotate catalog rows (host, pulled, modified_at, exact size); they never add rows."""
+    by_name = defaultdict(list)
+    for r in local_rows:
+        by_name[r["name"]].append(r)
+    for row in catalog_rows:
+        pulls = sorted(by_name.get(row["name"], []), key=lambda r: r["host"])
+        row["pulled"] = bool(pulls)
+        row["host"] = ";".join(r["host"] for r in pulls)
+        row["modified_at"] = ";".join(r["modified_at"] for r in pulls)
+        sizes = {r["disk_size_gb"] for r in pulls if r["disk_size_gb"] != ""}
+        if sizes:
+            # Exact bytes from the Ollama API beat the catalog's whole-GB rounding.
+            row["disk_size_gb"], row["size_source"] = pulls[0]["disk_size_gb"], "local"
+            if len(sizes) > 1:
+                problems.append(f"{row['name']}: local sizes differ between hosts ({', '.join(f'{r['host']} {r['disk_size_gb']}' for r in pulls)}); using {pulls[0]['host']}")
+        for r in pulls:
+            if r["digest"] and not r["digest"].startswith(row["digest"]):
+                problems.append(f"{r['host']} {r['name']}: local digest {r['digest'][:12]} != catalog {row['digest']} "
+                                f"(your pull is out of date, or the tag was re-pushed)")
+    catalog_names = {r["name"] for r in catalog_rows}
+    missing = sorted({f"{r['name']} ({r['host']})" for r in local_rows if r["name"] not in catalog_names})
+    if missing:
+        problems.insert(0, f"{len(missing)} pulled models not in catalog, excluded: {', '.join(missing)}")
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="ollama_inventory")
     p.add_argument("--refresh", action="store_true", help="re-pull data instead of using output/cache")
-    p.add_argument("--local-only", action="store_true", help="skip catalog and benchmark stages")
+    p.add_argument("--local-only", action="store_true",
+                   help="re-fetch the local inventory and rebuild both CSVs from the last catalog crawl, without crawling")
     p.add_argument("--include-community", action="store_true", help="include namespaced (user/model) catalog models")
     p.add_argument("--ollama-url", default=local.OLLAMA_URL, help="Ollama API to inventory (default %(default)s)")
     p.add_argument("--host", help="name from config/hosts.json for that Ollama (default: matched from this hostname)")
@@ -126,18 +108,24 @@ def main(argv=None):
         p.error(f"--host must be one of {sorted(hosts)} (could not infer it from hostname {socket.gethostname()!r})")
     how = "from --host" if args.host else f"from hostname {socket.gethostname()}"
     print(f"host: {host} ({how}), ollama: {args.ollama_url}")
-    local_rows, problems = load_local_rows(hosts, host, args.ollama_url, args.refresh)
-    catalog_rows = []
+    local_rows, problems = load_local_rows(hosts, host, args.ollama_url, args.refresh or args.local_only)
 
-    if not args.local_only:
+    if args.local_only:
+        if not CATALOG_PATH.exists():
+            p.error("--local-only needs a previous catalog crawl; run once without it first")
+        saved = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        rows, cat_problems = saved["rows"], saved["problems"]
+        print(f"catalog: reusing crawl from {saved['crawled_at']} (--local-only)")
+    else:
         now = datetime.now(timezone.utc)
         fetcher = Fetcher(CACHE_DIR, refresh=args.refresh)
-        catalog_rows, stats, cat_problems = catalog.crawl(fetcher, args.include_community, now)
-        problems += cat_problems
-        add_local_recency(local_rows, fetcher, now, problems)
+        rows, stats, cat_problems = catalog.crawl(fetcher, args.include_community, now)
         print("filter counts:", json.dumps(stats, indent=1))
-
-    rows = sorted(merge(local_rows, catalog_rows), key=lambda r: (r["source"], r["name"], r.get("host", "")))
+        CATALOG_PATH.write_text(json.dumps({"crawled_at": now.isoformat(timespec="seconds"), "rows": rows,
+                                            "problems": cat_problems}, indent=1), encoding="utf-8")
+    problems += cat_problems
+    apply_local_lookup(rows, local_rows, problems)
+    rows.sort(key=lambda r: r["name"])
     write_csv(rows, COLUMNS)
     print(f"wrote {CSV_PATH} ({len(rows)} rows)")
     by_model = collapse.collapse(rows, hosts)

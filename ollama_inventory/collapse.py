@@ -14,10 +14,9 @@ VARIANTS = ("coding",)
 EDITABLE = ("run_on",)
 
 BY_MODEL_COLUMNS = [
-    "name", "model", "size", "representative_tag", "run_on", "fits_min_gb", "fit_note", "fit_warn", "source",
-    "pulled_on", "is_cloud", "family", "parameter_size", "quantization", "context_length", "disk_size_gb",
-    "thinking", "tools", "vision", "pull_count", "first_published_approx", "date_flag", "date_source_text",
-    "all_tags", "url",
+    "name", "representative_tag", "run_on", "fits_min_gb", "fit_note", "fit_warn", "pulled_on", "family",
+    "parameter_size", "quantization", "context_length", "disk_size_gb", "size_source", "tools", "vision", "pull_count",
+    "first_published_approx", "all_tags", "url",
 ]
 
 
@@ -59,29 +58,27 @@ def _representative(label, members):
 
 
 DEFAULT_MARGIN_GB = 2
-LONG_CTX = 200_000  # tokens; "202K" below means 202,752 tokens / 1000
-NEAR_LIMIT = 0.8    # within 20% of a host's usable limit
+NEAR_LIMIT = 0.95  # warn when a model uses 95% or more of a host's usable limit
 
 
 def _usable(spec):
     return spec["max_gb"] - spec.get("margin_gb", DEFAULT_MARGIN_GB)
 
 
-def fit(disk_size_gb, context_length, hosts):
+def fit(disk_size_gb, hosts):
     """Return (fits_min_gb, fit_note, fit_warn, default run_on) against config/hosts.json.
     A model fits a host when disk_size_gb <= usable (max_gb - margin_gb); fits_min_gb is the smallest usable."""
     if disk_size_gb in ("", None):
         return "", "no disk size", "", ""
     size = float(disk_size_gb)
-    ctx = int(context_length) if str(context_length).isdigit() else 0
     fits = [name for name, spec in hosts.items() if size <= _usable(spec)]
     warns = []
     for name, spec in hosts.items():
         usable, margin = _usable(spec), spec.get("margin_gb", DEFAULT_MARGIN_GB)
         if usable < size <= usable + margin:
             warns.append(f"{size:g} GB misses {name} {usable:g} by {size - usable:.2g}")
-        elif name in fits and ctx > LONG_CTX and size >= NEAR_LIMIT * usable:
-            warns.append(f"{size:g} GB vs {name} {usable:g}, {ctx // 1000}K ctx")
+        elif name in fits and size >= NEAR_LIMIT * usable:
+            warns.append(f"{size:g} GB vs {name} {usable:g}, within 5%")
     fit_warn = "; ".join(warns)
     if fits:
         return min(_usable(hosts[n]) for n in fits), "", fit_warn, ";".join(fits)
@@ -99,27 +96,24 @@ def collapse(rows, hosts):
     out = []
     for (model, label), members in groups.items():
         rep = _representative(label, members)
-        local = [r for r in members if r["source"] == "local"]
-        fits_min_gb, fit_note, fit_warn, run_on = fit(rep.get("disk_size_gb"), rep.get("context_length"), hosts)
+        pulled_hosts = {h for r in members for h in r.get("host", "").split(";") if h}
+        fits_min_gb, fit_note, fit_warn, run_on = fit(rep.get("disk_size_gb"), hosts)
         out.append({
             **{k: rep.get(k, "") for k in BY_MODEL_COLUMNS},
             "name": f"{model}:{label}" if label else model,
-            "model": model,
-            "size": label,
             "representative_tag": rep["tag"],
             "run_on": run_on,
             "fits_min_gb": fits_min_gb,
             "fit_note": fit_note,
             "fit_warn": fit_warn,
-            "source": "local" if local else "catalog",
-            "pulled_on": ";".join(sorted({r["host"] for r in local})),
-            # A tag pulled on two hosts appears once, marked with *.
-            "all_tags": " ".join(sorted({r["tag"] + ("*" if r["source"] == "local" else "") for r in members})),
-            # Model-level fields: take them from any member that has them (local rows may lack catalog data).
+            "pulled_on": ";".join(sorted(pulled_hosts)),
+            # * marks tags pulled on at least one host.
+            "all_tags": " ".join(sorted(r["tag"] + ("*" if r.get("pulled") else "") for r in members)),
+            # Model-level fields: take them from any member that has them.
             **{k: next((r[k] for r in members if r.get(k) not in ("", None)), "")
-               for k in ("pull_count", "first_published_approx", "date_flag", "date_source_text")},
+               for k in ("pull_count", "first_published_approx")},
         })
-    return sorted(out, key=lambda r: (r["source"], r["name"]))
+    return sorted(out, key=lambda r: r["name"])
 
 
 def write_by_model(rows, path, defaults_path):

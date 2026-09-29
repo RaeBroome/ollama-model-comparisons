@@ -21,15 +21,17 @@ Run everything from the repo root. Outputs are written to `./output/`.
 ## Regenerate the CSVs
 
 ```sh
-python -m ollama_inventory            # normal run
-python -m ollama_inventory --refresh  # force fresh data
+python -m ollama_inventory               # normal run
+python -m ollama_inventory --local-only  # after pulling or removing models (seconds)
+python -m ollama_inventory --refresh     # force fresh data (about 5 minutes)
 ```
 
 The tool saves what it downloads in `output/cache/` (your Ollama model list and the ollama.com pages) and reuses it on later runs:
 
 - **First run, or a fresh clone:** there's no cache yet, so a normal run downloads everything (about 5 minutes).
 - **Later runs:** a normal run reuses the cache and finishes in seconds. It won't notice models you've pulled or removed since, or new catalog releases.
-- **`--refresh`:** ignores the cache and downloads everything again (about 5 minutes). Use it after pulling or removing models, or to check for new releases.
+- **`--local-only`:** re-reads this machine's Ollama model list and rebuilds both CSVs from the last catalog crawl, without contacting ollama.com. Use it after pulling or removing models. It needs one earlier normal run.
+- **`--refresh`:** ignores the cache and downloads everything again (about 5 minutes). Use it to check for new catalog releases.
 
 Both CSVs are rewritten on every run; your `run_on` edits are kept.
 For your other machine, add `--host framework --ollama-url http://<framework-address>:11434`.
@@ -38,36 +40,41 @@ For your other machine, add `--host framework --ollama-url http://<framework-add
 
 | Stage | What it does | Status |
 |---|---|---|
-| 1. Local inventory | Calls `/api/tags`, then `/api/show` for each model, on one host. Captures family, parameter size, quantization, context length, disk size, capabilities and `modified_at` (UTC). Flags cloud models (`-cloud` / `:cloud` tags, or a `remote_host`). | done |
-| 2. Catalog | Crawls `ollama.com/search?o=newest&c=thinking` and each model's page and tags page. Drops cloud tags and models first published more than 183 days ago, then merges the result with your local rows. | done |
+| 1. Local inventory | Calls `/api/tags`, then `/api/show` for each model, on one host. It adds no rows; it marks which catalog tags are pulled on which host, when they were pulled (UTC), and their exact size. Pulled models that aren't in the catalog are listed in a warning and left out. | done |
+| 2. Catalog | Crawls `ollama.com/search?o=newest&c=thinking` and each model's page and tags page. Drops cloud tags and models first published more than 183 days ago. **This is the only source of rows**, so every row is a local thinking model published in the last 6 months. | done |
 | 3. Benchmarks | Benchmark columns filled only from fetched sources, plus your RCAEval results. | not built yet |
 | 4. Output | Final column order and a summary. | not built yet |
 
-ollama.com shows tag ages only as relative text ("5 months ago"). Each model's publish date is therefore a **range** (`first_published_approx`), derived from its oldest tag and capped by the model's absolute "Updated" timestamp. Models whose range straddles the cutoff are excluded and reported. `date_flag` marks models that are probably older than their tags suggest (their tags look re-pushed).
+ollama.com shows tag ages only as relative text ("5 months ago"). Each model's publish date is therefore a **range** (`first_published_approx`), derived from its oldest tag and capped by the model's absolute "Updated" timestamp. Models whose range straddles the cutoff are excluded and reported. Models that are probably older than their tags suggest are kept, but each run prints a warning naming them. The sign is that the catalog's newest-first listing puts them after a model already known to be older than the cutoff, which suggests their tags were re-pushed.
 
 ## Flags
 
 | Flag | Effect |
 |---|---|
-| *(none)* | Inventory this machine's Ollama, crawl the catalog (from cache if present), and write both CSVs. |
+| *(none)* | Inventory this machine's Ollama (from cache if present), crawl the catalog (from cache if present), and write both CSVs. |
 | `--host NAME` | Which `config/hosts.json` entry this run inventories. Defaults to the entry whose name starts the machine's hostname; if none matches, you must pass it. The chosen host is printed at the start of every run. |
 | `--ollama-url URL` | Ollama API to inventory (default `http://localhost:11434`). Combine with `--host` to inventory another machine, e.g. `--host framework --ollama-url http://framework.local:11434`. |
 | `--refresh` | Re-fetch everything instead of using `output/cache/`. Without it, cached API responses and pages are reused. |
-| `--local-only` | Stage 1 only: skip the catalog (and later the benchmark) stages. |
+| `--local-only` | Re-fetch this host's local inventory and rebuild both CSVs from the last catalog crawl (`output/cache/catalog_rows.json`), skipping the crawl. Fails if there's no earlier crawl. |
 | `--include-community` | Also crawl namespaced `user/model` catalog entries (off by default). ollama.com only lists these when the search box is non-empty, so this crawls `q=%20` (a single space). That's roughly 60 pages for 6 months, so it's slow at 1 request per second. |
 
-Each host's Stage 1 inventory is cached separately (`output/cache/local_<host>.json`). A run against one host never overwrites another host's rows; the CSVs always combine every host inventoried so far.
+Each host's Stage 1 inventory is cached separately (`output/cache/local_<host>.json`). A run against one host never overwrites another host's inventory, and the pulled markers always combine every host inventoried so far.
 
 The catalog crawl makes at most 1 request per second and caches every page. A full first run takes about 5 minutes.
 
 ## Outputs
 
-**`output/ollama_models.csv`: one row per tag** (e.g. `gemma4:12b-it-q8_0`). Local rows have `source=local`, and there is one row per host that has the tag pulled. Catalog rows (`source=catalog`) are tags you haven't pulled. MLX/nvfp4/mxfp8 tags are included here, but their parameter size and quantization are blank because their pages don't list them.
+**`output/ollama_models.csv`: one row per catalog tag** (e.g. `gemma4:12b-it-q8_0`). MLX/nvfp4/mxfp8 tags are included here, but their parameter size and quantization are blank because their pages don't list them. For tags you've pulled:
 
-**`output/ollama_models_by_model.csv`: one row per model + size** (e.g. `gemma4:12b`, `qwen3.6:27b-coding`). MLX/nvfp4/mxfp8 tags are dropped. Each row shows one representative tag: Ollama's default for that size, i.e. the bare size tag, else `latest`. The other tags are listed in `all_tags`, with `*` marking pulled ones. `pulled_on` lists the hosts that have the model. Fit columns:
+- `pulled` is `True`.
+- `host` lists the hosts that have the tag, joined with `;` (e.g. `shadow;framework`). It's blank if the tag isn't pulled anywhere.
+- `modified_at` lists when each of those hosts pulled it (UTC), joined with `;` in the same order as `host`.
+- `disk_size_gb` is the exact size reported by your Ollama, and `size_source` is `local`. For tags you haven't pulled, the size is the catalog's figure, rounded to whole GB, and `size_source` is `catalog`.
+
+**`output/ollama_models_by_model.csv`: one row per model + size** (e.g. `gemma4:12b`, `qwen3.6:27b-coding`). MLX/nvfp4/mxfp8 tags are dropped. Each row shows one representative tag: Ollama's default for that size, i.e. the bare size tag, else `latest`. The other tags are listed in `all_tags`, with `*` marking pulled ones. `pulled_on` lists the hosts that have any tag in the group. `disk_size_gb` and `size_source` come from the representative tag, so the size is exact only when the representative tag itself is pulled. Fit columns (computed from that size):
 
 - `fits_min_gb`: the smallest usable limit (`max_gb - margin_gb`) among hosts the model fits. Blank if it fits none, with the reason in `fit_note`.
-- `fit_warn`: set when the model misses a host by less than that host's margin, or when it has over 200,000 tokens of context and is within 20% of a host's usable limit.
+- `fit_warn`: set when the model misses a host by less than that host's margin, or when it fits a host but is within 5% of that host's usable limit.
 
 ### Columns you edit by hand
 
