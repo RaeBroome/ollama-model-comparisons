@@ -10,11 +10,22 @@ Dependencies are `requests` and the Python standard library (Python 3.11+).
 
 ## Setup
 
-```sh
+In PowerShell:
+
+```powershell
 python -m venv .venv
-.venv/Scripts/activate        # Windows; use `source .venv/bin/activate` elsewhere
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
+
+If PowerShell refuses `Activate.ps1` with an execution-policy error, skip activation and call the venv's Python directly. That works for every command in this README:
+
+```powershell
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m ollama_inventory
+```
+
+On macOS or Linux, activate with `source .venv/bin/activate` instead.
 
 Run everything from the repo root. Outputs are written to `./output/`.
 
@@ -34,7 +45,7 @@ The tool saves what it downloads in `output/cache/` (your Ollama model list and 
 - **`--refresh`:** ignores the cache and downloads everything again (about 5 minutes). Use it to check for new catalog releases.
 
 Both CSVs are rewritten on every run; your `run_on` edits are kept.
-For your other machine, add `--host framework --ollama-url http://<framework-address>:11434`.
+For your other machine, add `--host framework --ollama-url http://<framework-address>:11434` (see the note under Flags first).
 
 ## Stages
 
@@ -57,6 +68,8 @@ ollama.com shows tag ages only as relative text ("5 months ago"). Each model's p
 | `--refresh` | Re-fetch everything instead of using `output/cache/`. Without it, cached API responses and pages are reused. |
 | `--local-only` | Re-fetch this host's local inventory and rebuild both CSVs from the last catalog crawl (`output/cache/catalog_rows.json`), skipping the crawl. Fails if there's no earlier crawl. |
 | `--include-community` | Also crawl namespaced `user/model` catalog entries (off by default). ollama.com only lists these when the search box is non-empty, so this crawls `q=%20` (a single space). That's roughly 60 pages for 6 months, so it's slow at 1 request per second. |
+
+**Inventorying another machine (untested).** Ollama listens only on localhost by default, so `--ollama-url` pointing at another machine will fail to connect until that machine's Ollama accepts remote connections. On that machine, set `OLLAMA_HOST=0.0.0.0` and restart Ollama, then add a firewall rule allowing inbound TCP on port 11434. This setup hasn't been tried with this tool yet.
 
 Each host's Stage 1 inventory is cached separately (`output/cache/local_<host>.json`). A run against one host never overwrites another host's inventory, and the pulled markers always combine every host inventoried so far.
 
