@@ -21,14 +21,18 @@ Run everything from the repo root. Outputs are written to `./output/`.
 ## Regenerate the CSVs
 
 ```sh
-python -m ollama_inventory            # rebuild both CSVs from cached data (fast, no downloads)
-python -m ollama_inventory --refresh  # re-query Ollama and re-download ollama.com (about 5 minutes)
+python -m ollama_inventory            # normal run
+python -m ollama_inventory --refresh  # force fresh data
 ```
 
-- **Use `--refresh` after pulling or removing models**, or to pick up new catalog releases. A plain run reuses `output/cache/`, including this machine's saved model list, so it won't see changes. `--refresh` re-fetches both the local inventory and the catalog.
-- **For your other machine**, add `--host framework --ollama-url http://<framework-address>:11434`.
-- **Both CSVs are rewritten every run.** Your `run_on` edits in `ollama_models_by_model.csv` are kept.
-- Each run starts by printing the host it chose, e.g. `host: shadow (from hostname ...)`.
+The tool saves what it downloads in `output/cache/` (your Ollama model list and the ollama.com pages) and reuses it on later runs:
+
+- **First run, or a fresh clone:** there's no cache yet, so a normal run downloads everything (about 5 minutes).
+- **Later runs:** a normal run reuses the cache and finishes in seconds. It won't notice models you've pulled or removed since, or new catalog releases.
+- **`--refresh`:** ignores the cache and downloads everything again (about 5 minutes). Use it after pulling or removing models, or to check for new releases.
+
+Both CSVs are rewritten on every run; your `run_on` edits are kept.
+For your other machine, add `--host framework --ollama-url http://<framework-address>:11434`.
 
 ## Stages
 
@@ -45,7 +49,7 @@ ollama.com shows tag ages only as relative text ("5 months ago"). Each model's p
 
 | Flag | Effect |
 |---|---|
-| *(none)* | Inventory this machine's Ollama, crawl the catalog (reading cached pages), and write both CSVs. |
+| *(none)* | Inventory this machine's Ollama, crawl the catalog (from cache if present), and write both CSVs. |
 | `--host NAME` | Which `config/hosts.json` entry this run inventories. Defaults to the entry whose name starts the machine's hostname; if none matches, you must pass it. The chosen host is printed at the start of every run. |
 | `--ollama-url URL` | Ollama API to inventory (default `http://localhost:11434`). Combine with `--host` to inventory another machine, e.g. `--host framework --ollama-url http://framework.local:11434`. |
 | `--refresh` | Re-fetch everything instead of using `output/cache/`. Without it, cached API responses and pages are reused. |
